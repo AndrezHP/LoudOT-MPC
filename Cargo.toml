@@ -23,6 +23,7 @@ members = [
     "swanky-flatbuffer-build",
     "vectoreyes",
     "zkv",
+    "loud-ot-mpc",
 ]
 
 
