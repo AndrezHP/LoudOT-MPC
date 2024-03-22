@@ -10,3 +10,6 @@ ocelot.workspace = true
 scuttlebutt.workspace = true
 rand = "0.8.5"
 generic-array = "0.14.7"
+sha3 = { version = "0.10.8", features = [] }
+blake2 = "0.10.6"
+aes = "0.8.3"

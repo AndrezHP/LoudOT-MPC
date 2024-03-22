@@ -4,18 +4,35 @@ use rand::{CryptoRng, Rng};
 use ocelot::svole::wykw::{LPN_EXTEND_SMALL, LPN_SETUP_SMALL};
 use scuttlebutt::{field::{FiniteField}, AbstractChannel};
 use scuttlebutt::serialization::CanonicalSerialize;
+use sha3::{digest::{Update, ExtendableOutput, XofReader}};
+use blake2::{Blake2b, Digest};
+use aes::cipher::consts::U16;
 
 fn main() {
     println!("Hello Mr. PC?");
     a_bit();
-    ha_and();
-    la_and();
     a_and();
 }
 
+trait Lsb {
+    fn lsb(self) -> bool;
+}
+
+impl Lsb for u128 {
+    fn lsb(self) -> bool {
+        (self & 1) == 1
+    }
+}
+
+type Blake2b128 = Blake2b<U16>;
+pub fn blake2(bytes: &[u8]) -> u128 {
+    let mut hasher = Blake2b128::new();
+    Update::update(&mut hasher, bytes);
+    let res = hasher.finalize();
+    return u128::from_le_bytes(res.into());
+}
+
 pub struct TripleSender<FE: FiniteField> {
-    uws: Vec<(FE::PrimeField, FE)>,
-    vs: Vec<FE>,
     x0_bits: Vec<bool>,
     x0_macs: Vec<u128>,
     y0_bits: Vec<bool>,
@@ -24,6 +41,7 @@ pub struct TripleSender<FE: FiniteField> {
     x1_keys: Vec<u128>,
     y1_keys: Vec<u128>,
     r_keys: Vec<u128>,
+    whatever: Vec<FE>
 }
 
 impl<FE: FiniteField> TripleSender<FE> {
@@ -35,9 +53,10 @@ impl<FE: FiniteField> TripleSender<FE> {
         svole_receiver.receive(channel, rng, &mut vs).unwrap();
         let delta = fe_to_u128(&svole_receiver.delta());
 
-        let mut x1_keys = Vec::new();
-        let mut y1_keys = Vec::new();
-        let mut r_keys = Vec::new();
+        let fraction = vs.len() / 3;
+        let mut x1_keys = vs[0..fraction].iter().map(|v| fe_to_u128(v)).collect();
+        let mut y1_keys = vs[fraction..fraction * 2].iter().map(|v| fe_to_u128(v)).collect();
+        let mut r_keys = vs[fraction * 2..fraction * 3].iter().map(|v| fe_to_u128(v)).collect();
 
         // Get authenticated bits and macs
         let mut svole_sender: wykw::Sender<FE> =
@@ -52,9 +71,8 @@ impl<FE: FiniteField> TripleSender<FE> {
             x0_bits.push(*u.bit_decomposition().get(0).unwrap());
             x0_macs.push(fe_to_u128(w));
         }
+        let whatever: Vec<FE> = Vec::new();
         return Self {
-            uws,
-            vs,
             x0_bits,
             x0_macs,
             y0_bits,
@@ -63,7 +81,28 @@ impl<FE: FiniteField> TripleSender<FE> {
             x1_keys,
             y1_keys,
             r_keys,
+            whatever
         }
+    }
+    pub fn ha_and<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG) {
+        // self.x0_bits
+        let mut H: Vec<(bool, bool)> = Vec::new();
+        let mut s1_bits: Vec<bool> = Vec::new();
+
+        for (i , x1_key) in self.x1_keys.iter().enumerate() {
+            let s1: bool = rng.gen();
+            s1_bits.push(s1);
+            let H0 = blake2(&x1_key.to_le_bytes()).lsb() ^ s1;
+            let H1 = blake2(&(x1_key ^ self.delta).to_le_bytes()).lsb() ^ s1 ^ self.y0_bits[i];
+            H.push((H0, H1));
+        }
+
+        // Send H values on the channel
+
+        // Receive H values from the channel
+    }
+    pub fn la_and<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG) {
+
     }
 }
 
@@ -106,15 +145,15 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         // Pool of uws for r bit and mac generation
         let r_pool = &uws[fraction * 2.. fraction * 3];
 
-        for (u, w) in &x1_pool {
+        for (u, w) in x1_pool {
             x1_bits.push(*u.bit_decomposition().get(0).unwrap());
             x1_macs.push(fe_to_u128(w));
         }
-        for (u, w) in &y1_pool {
+        for (u, w) in y1_pool {
             y1_bits.push(*u.bit_decomposition().get(0).unwrap());
             y1_macs.push(fe_to_u128(w));
         }
-        for (u, w) in &r_pool {
+        for (u, w) in r_pool {
             r_bits.push(*u.bit_decomposition().get(0).unwrap());
             r_macs.push(fe_to_u128(w));
         }
@@ -127,7 +166,7 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         let delta = fe_to_u128(&svole_receiver.delta());
         let mut x0_keys: Vec<u128> = vs.iter().map(|v| fe_to_u128(v)).collect();
         let mut y0_keys = Vec::new();
-        let whatever: Vec<FE> = vs;
+        let whatever = vs.clone();
         return Self {
             x1_bits,
             x1_macs,
@@ -141,9 +180,31 @@ impl<FE: FiniteField> TripleReceiver<FE> {
             whatever
         }
     }
+    pub fn ha_and<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG) {
+        let mut H: Vec<(bool, bool)> = Vec::new();
+        let mut t1_bits: Vec<bool> = Vec::new();
+
+        for (i , x0_key) in self.x0_keys.iter().enumerate() {
+            let s1: bool = rng.gen();
+            t1_bits.push(s1);
+            let H0 = blake2(&x0_key.to_le_bytes()).lsb() ^ s1;
+            let H1 = blake2(&(x0_key ^ self.delta).to_le_bytes()).lsb() ^ s1 ^ self.y1_bits[i];
+            H.push((H0, H1));
+        }
+
+        // Receive H values from the channel
+        let mut H_received: Vec<(bool, bool)> = Vec::new();
+
+
+
+        // Sender H values on the channel
+    }
 }
 
-fn fe_to_u128<FE: FiniteField>(w: &FE) -> u128 {
+
+
+
+    fn fe_to_u128<FE: FiniteField>(w: &FE) -> u128 {
     let mut result: u128 = 0;
     for (index, &bit) in w.bit_decomposition().iter().enumerate() {
         if bit {
@@ -157,18 +218,9 @@ fn a_bit() {
     // from COT
 }
 
-fn ha_and() {
-    // only authenticates x1 and x2 from a_bit
-}
-
-fn la_and() {
-
-}
-
 fn a_and() {
 
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -201,20 +253,27 @@ mod tests {
         let triple_sender: TripleSender<FE> = TripleSender::init(&mut channel, &mut rng);
 
         let triple_receiver = handle.join().unwrap();
-        for i in 0..triple_receiver.x0_keys.len() {
+        for i in 0..triple_sender.x0_bits.len() {
             let u_delta = u128::from(triple_sender.x0_bits[i]) * triple_receiver.delta;
             assert_eq!(triple_receiver.x0_keys[i] ^ u_delta, triple_sender.x0_macs[i]);
         }
-        /*for i in 0..triple_receiver.uws.len() {
-            let right: FE = triple_receiver.uws[i].0 * triple_sender.delta + triple_sender.vs[i];
-            assert_eq!(triple_receiver.uws[i].1, right);
+        for i in 0..triple_receiver.x1_bits.len() {
+            let u_delta = u128::from(triple_receiver.x1_bits[i]) * triple_sender.delta;
+            assert_eq!(triple_sender.x1_keys[i] ^ u_delta, triple_receiver.x1_macs[i]);
         }
-        println!("Number of uws: {}", triple_sender.uws.len());
+        for i in 0..triple_receiver.y1_bits.len() {
+            let u_delta = u128::from(triple_receiver.y1_bits[i]) * triple_sender.delta;
+            assert_eq!(triple_sender.y1_keys[i] ^ u_delta, triple_receiver.y1_macs[i]);
+        }
+        for i in 0..triple_receiver.r_bits.len() {
+            let u_delta = u128::from(triple_receiver.r_bits[i]) * triple_sender.delta;
+            assert_eq!(triple_sender.r_keys[i] ^ u_delta, triple_receiver.r_macs[i]);
+        }
+        /*println!("Number of uws: {}", triple_sender.uws.len());
         for i in 0..triple_sender.uws.len() {
             let right: FE = triple_sender.uws[i].0 * triple_receiver.delta + triple_receiver.vs[i];
             assert_eq!(triple_sender.uws[i].1, right);
         }*/
-
     }
 
     #[test]
