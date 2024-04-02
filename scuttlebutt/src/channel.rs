@@ -123,6 +123,22 @@ pub trait AbstractChannel {
         Ok(s)
     }
 
+    /// Write a `u128` to the channel.
+    #[inline(always)]
+    fn write_u128(&mut self, s: u128) -> Result<()> {
+        let data: [u8; 16] = s.to_le_bytes();
+        self.write_bytes(&data)?;
+        Ok(())
+    }
+
+    /// Read a 'u128' from the channel.
+    fn read_u128(&mut self) -> Result<u128> {
+        let mut data = [0u8; 16];
+        self.read_bytes(&mut data)?;
+        let s = u128::from_le_bytes(data);
+        Ok(s)
+    }
+
     /// Write a `usize` to the channel.
     #[inline(always)]
     fn write_usize(&mut self, s: usize) -> Result<()> {
