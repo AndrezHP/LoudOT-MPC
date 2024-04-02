@@ -5,6 +5,7 @@ use scuttlebutt::{field::{FiniteField}, AbstractChannel};
 use sha3::{digest::{Update}};
 use blake2::{Blake2b, Digest};
 use aes::cipher::consts::U16;
+use::std::marker::PhantomData;
 
 fn main() {
     println!("Hello Mr. PC?");
@@ -39,7 +40,7 @@ pub struct TripleSender<FE: FiniteField> {
     x1_keys: Vec<u128>,
     y1_keys: Vec<u128>,
     r1_keys: Vec<u128>,
-    whatever: Vec<FE>
+    type_data: PhantomData<FE>
 }
 
 impl<FE: FiniteField> TripleSender<FE> {
@@ -88,9 +89,6 @@ impl<FE: FiniteField> TripleSender<FE> {
             r0_bits.push(*u.bit_decomposition().get(0).unwrap());
             r0_macs.push(fe_to_u128(w));
         }
-
-        // TODO remove whatever
-        let whatever: Vec<FE> = Vec::new();
         return Self {
             x0_bits,
             x0_macs,
@@ -102,7 +100,7 @@ impl<FE: FiniteField> TripleSender<FE> {
             x1_keys,
             y1_keys,
             r1_keys,
-            whatever
+            type_data: PhantomData
         }
     }
     pub fn ha_and<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG) -> Vec<bool> {
@@ -287,7 +285,7 @@ pub struct TripleReceiver<FE: FiniteField> {
     x0_keys: Vec<u128>,
     y0_keys: Vec<u128>,
     r0_keys: Vec<u128>,
-    whatever: Vec<FE>
+    type_data: PhantomData<FE>
 }
 
 impl<FE: FiniteField> TripleReceiver<FE> {
@@ -340,7 +338,6 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         let y0_keys = vs[fraction..fraction * 2].iter().map(|v| fe_to_u128(v)).collect();
         let r0_keys = vs[fraction * 2..fraction * 3].iter().map(|v| fe_to_u128(v)).collect();
 
-        let whatever = vs.clone();
         return Self {
             x1_bits,
             x1_macs,
@@ -352,7 +349,7 @@ impl<FE: FiniteField> TripleReceiver<FE> {
             x0_keys,
             y0_keys,
             r0_keys,
-            whatever
+            type_data: PhantomData
         }
     }
     pub fn ha_and<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG) -> Vec<bool> {
