@@ -1,11 +1,12 @@
-use::ocelot::svole::{SVoleSender, SVoleReceiver, wykw};
-use rand::{CryptoRng, Rng};
+use ocelot::svole::{SVoleSender, SVoleReceiver, wykw};
+use rand::{CryptoRng, Rng, SeedableRng};
 use ocelot::svole::wykw::{LPN_EXTEND_EXTRASMALL, LPN_SETUP_EXTRASMALL};
-use scuttlebutt::{field::{FiniteField}, AbstractChannel};
+use scuttlebutt::{field::{FiniteField}, AbstractChannel, AesRng};
 use sha3::{digest::{Update}};
 use blake2::{Blake2b, Digest};
-use aes::cipher::consts::U16;
-use::std::marker::PhantomData;
+use aes::cipher::consts::{U16, U32};
+use std::marker::PhantomData;
+use rand_chacha::ChaCha20Rng;
 
 fn main() {
     println!("Hello Mr. PC?");
@@ -22,11 +23,31 @@ impl Lsb for u128 {
 }
 
 type Blake2b128 = Blake2b<U16>;
-pub fn blake2(bytes: &[u8]) -> u128 {
+type Blake2b256 = Blake2b<U32>;
+pub fn blake2_128(bytes: &[u8]) -> u128 {
     let mut hasher = Blake2b128::new();
     Update::update(&mut hasher, bytes);
     let res = hasher.finalize();
     return u128::from_le_bytes(res.into());
+}
+pub fn blake2_256(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Blake2b256::new();
+    Update::update(&mut hasher, bytes);
+    let res = hasher.finalize();
+    return res.into();
+}
+
+struct AuthTriple {
+    x_share: bool,
+    y_share: bool,
+    z_share: bool,
+    x_mac: u128,
+    y_mac: u128,
+    z_mac: u128,
+    // Keys on the other party's shares
+    x_key: u128,
+    y_key: u128,
+    z_key: u128,
 }
 
 pub struct TripleSender<FE: FiniteField> {
@@ -34,11 +55,13 @@ pub struct TripleSender<FE: FiniteField> {
     x0_macs: Vec<u128>,
     y0_bits: Vec<bool>,
     y0_macs: Vec<u128>,
+    z0_bits: Vec<bool>,
     r0_bits: Vec<bool>,
     r0_macs: Vec<u128>,
     delta: u128,
     x1_keys: Vec<u128>,
     y1_keys: Vec<u128>,
+    z1_keys: Vec<u128>,
     r1_keys: Vec<u128>,
     type_data: PhantomData<FE>
 }
@@ -94,11 +117,13 @@ impl<FE: FiniteField> TripleSender<FE> {
             x0_macs,
             y0_bits,
             y0_macs,
+            z0_bits: vec![],
             r0_bits,
             r0_macs,
             delta,
             x1_keys,
             y1_keys,
+            z1_keys: vec![],
             r1_keys,
             type_data: PhantomData
         }
@@ -111,8 +136,8 @@ impl<FE: FiniteField> TripleSender<FE> {
         for (i , x1_key) in self.x1_keys.iter().enumerate() {
             let s0: bool = rng.gen();
             s0_bits.push(s0);
-            let h0 = blake2(&x1_key.to_le_bytes()).lsb() ^ s0;
-            let h1 = blake2(&(x1_key ^ self.delta).to_le_bytes()).lsb() ^ s0 ^ self.y0_bits[i];
+            let h0 = blake2_128(&x1_key.to_le_bytes()).lsb() ^ s0;
+            let h1 = blake2_128(&(x1_key ^ self.delta).to_le_bytes()).lsb() ^ s0 ^ self.y0_bits[i];
             h.push((h0, h1));
         }
 
@@ -136,7 +161,7 @@ impl<FE: FiniteField> TripleSender<FE> {
         for (i, x0_mac) in self.x0_macs.iter().enumerate() {
             let x0: bool = self.x0_bits[i];
             let h_x0: bool = if x0 { h_received[i].1} else { h_received[i].0};
-            let t1: bool = h_x0 ^ blake2(&x0_mac.to_le_bytes()).lsb();
+            let t1: bool = h_x0 ^ blake2_128(&x0_mac.to_le_bytes()).lsb();
             let v0: bool = s0_bits[i] ^ t1;
             v0_bits.push(v0);
         }
@@ -182,10 +207,10 @@ impl<FE: FiniteField> TripleSender<FE> {
         for i in 0..number_of_triples {
             let r: u128 = rng.gen();
             rs.push(r);
-            let v0 = blake2(&[self.x0_macs[i].to_le_bytes(), self.r0_macs[i].to_le_bytes()].concat());
-            let v1 = blake2(&[self.x0_macs[i].to_le_bytes(), (self.r0_macs[i] ^ self.y0_macs[i]).to_le_bytes()].concat());
-            let hash0 = blake2(&self.x1_keys[i].to_le_bytes());
-            let hash1 = blake2(&(self.x1_keys[i] ^ self.delta).to_le_bytes());
+            let v0 = blake2_128(&[self.x0_macs[i].to_le_bytes(), self.r0_macs[i].to_le_bytes()].concat());
+            let v1 = blake2_128(&[self.x0_macs[i].to_le_bytes(), (self.r0_macs[i] ^ self.y0_macs[i]).to_le_bytes()].concat());
+            let hash0 = blake2_128(&self.x1_keys[i].to_le_bytes());
+            let hash1 = blake2_128(&(self.x1_keys[i] ^ self.delta).to_le_bytes());
             if !self.x0_bits[i] {
                 let w00 = hash0 ^ v0 ^ r;
                 let w01 = hash1 ^ v1 ^ r;
@@ -212,14 +237,14 @@ impl<FE: FiniteField> TripleSender<FE> {
         let mut us: Vec<u128>  = Vec::new();
         for i in 0..number_of_triples {
             if !self.x0_bits[i] {
-                let t0 = blake2(&[self.x1_keys[i].to_le_bytes(), (z1_keys[i] ^ (z0[i] as u128 * self.delta)).to_le_bytes()].concat());
+                let t0 = blake2_128(&[self.x1_keys[i].to_le_bytes(), (z1_keys[i] ^ (z0[i] as u128 * self.delta)).to_le_bytes()].concat());
                 ts.push(t0);
-                let u0 = t0 ^ blake2(&[(self.x1_keys[i] ^ self.delta).to_le_bytes(), (self.y1_keys[i] ^ z1_keys[i] ^ (self.y0_bits[i] ^ z0[i]) as u128 * self.delta).to_le_bytes()].concat());
+                let u0 = t0 ^ blake2_128(&[(self.x1_keys[i] ^ self.delta).to_le_bytes(), (self.y1_keys[i] ^ z1_keys[i] ^ (self.y0_bits[i] ^ z0[i]) as u128 * self.delta).to_le_bytes()].concat());
                 us.push(u0);
             } else {
-                let t1 = blake2(&[self.x1_keys[i].to_le_bytes(), (self.y1_keys[i] ^ z1_keys[i] ^ ((self.y0_bits[i] ^ z0[i]) as u128 * self.delta)).to_le_bytes()].concat());
+                let t1 = blake2_128(&[self.x1_keys[i].to_le_bytes(), (self.y1_keys[i] ^ z1_keys[i] ^ ((self.y0_bits[i] ^ z0[i]) as u128 * self.delta)).to_le_bytes()].concat());
                 ts.push(t1);
-                let u1 = t1 ^ blake2(&[(self.x1_keys[i] ^ self.delta).to_le_bytes(), (z1_keys[i] ^ (z0[i] as u128 * self.delta)).to_le_bytes()].concat());
+                let u1 = t1 ^ blake2_128(&[(self.x1_keys[i] ^ self.delta).to_le_bytes(), (z1_keys[i] ^ (z0[i] as u128 * self.delta)).to_le_bytes()].concat());
                 us.push(u1)
             }
         }
@@ -235,7 +260,7 @@ impl<FE: FiniteField> TripleSender<FE> {
         for i in 0..number_of_triples {
             let w0 = channel.read_u128().unwrap();
             let w1 = channel.read_u128().unwrap();
-            let mac_hash = blake2(&self.x0_macs[i].to_le_bytes());
+            let mac_hash = blake2_128(&self.x0_macs[i].to_le_bytes());
             if !self.x0_bits[i] {
                 r_primes.push(w0 ^ mac_hash ^ ts[i]);
             } else {
@@ -245,14 +270,18 @@ impl<FE: FiniteField> TripleSender<FE> {
 
         // EQ box
         assert!(self.eq(channel, rng, &r_primes));
+
+        self.z0_bits = z0;
+        self.z1_keys = z1_keys;
     }
 
+    // From NNOB/TinyOT
     fn eq<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG, xs: &Vec<u128>) -> bool {
         let mut rs: Vec<u128> = Vec::new();
         for x in xs {
             let r: u128 = rng.gen();
             rs.push(r);
-            let c = blake2(&[x.to_le_bytes(), r.to_le_bytes()].concat());
+            let c = blake2_128(&[x.to_le_bytes(), r.to_le_bytes()].concat());
             channel.write_u128(c).unwrap();
         }
         channel.flush().unwrap();
@@ -272,6 +301,84 @@ impl<FE: FiniteField> TripleSender<FE> {
 
         return true;
     }
+
+    fn a_and<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG, l: u128, b: usize) {
+        self.la_and(channel, rng);
+
+        let r = rng.gen();
+        channel.write_u128(r).unwrap();
+        channel.flush().unwrap();
+
+        let r_prime = channel.read_u128().unwrap();
+        let r_combined = blake2_256(&[r.to_le_bytes(), r_prime.to_le_bytes()].concat());
+        let mut cha_rng: ChaCha20Rng = ChaCha20Rng::from_seed(r_combined);
+
+        for i in (1..self.z0_bits.len()).rev() {
+            let j = cha_rng.gen_range(0..(i+1));
+            self.z0_bits.swap(i, j);
+            self.z1_keys.swap(i, j);
+            self.r0_macs.swap(i, j);
+        }
+
+        let mut triples = Vec::new();
+
+        for i in (0..self.z0_bits.len()).step_by(b) {
+            let mut x_share = self.x0_bits[i];
+            let mut y_share = self.y0_bits[i];
+            let mut z_share = self.z0_bits[i];
+            let mut x_mac = self.x0_macs[i];
+            let mut y_mac = self.y0_macs[i];
+            let mut z_mac = self.r0_macs[i];
+            let mut x_key = self.x1_keys[i];
+            let mut y_key = self.y1_keys[i];
+            let mut z_key = self.z1_keys[i];
+            for j in 1..b {
+                let mut d = y_share ^ self.y0_bits[j];
+                let d_mac = y_mac ^ self.y0_macs[j];
+                channel.write_bool(d).unwrap();
+                channel.write_u128(d_mac).unwrap();
+                channel.flush().unwrap();
+
+                let d_prime = channel.read_bool().unwrap();
+                let d_prime_mac = channel.read_u128().unwrap();
+
+                let d_prime_key = y_key ^ self.y1_keys[j];
+
+                let d_delta = if d_prime { self.delta } else { 0 };
+                if d_prime_mac != d_prime_key ^ d_delta {
+                    panic!("Wrong MAC");
+                }
+
+                d = d ^ d_prime;
+
+                x_share = x_share ^ self.x0_bits[j];
+                x_mac = x_mac ^ self.x0_macs[j];
+                x_key = x_key ^ self.x1_keys[j];
+
+                if d {
+                    z_share = z_share ^ self.z0_bits[j] ^ self.x0_bits[j];
+                    z_mac = z_mac ^ self.r0_macs[j] ^ self.x0_macs[j];
+                    z_key = z_key ^ self.z1_keys[j] ^ self.x1_keys[j];
+                } else {
+                    z_share = z_share ^ self.z0_bits[j];
+                    z_mac = z_mac ^ self.r0_macs[j];
+                    z_key = z_key ^ self.z1_keys[j];
+                }
+            }
+            let triple = AuthTriple {
+                x_share,
+                y_share,
+                z_share,
+                x_mac,
+                y_mac,
+                z_mac,
+                x_key,
+                y_key,
+                z_key,
+            };
+            triples.push(triple);
+        }
+    }
 }
 
 pub struct TripleReceiver<FE: FiniteField> {
@@ -279,11 +386,13 @@ pub struct TripleReceiver<FE: FiniteField> {
     x1_macs: Vec<u128>,
     y1_bits: Vec<bool>,
     y1_macs: Vec<u128>,
+    z1_bits: Vec<bool>,
     r1_bits: Vec<bool>,
     r1_macs: Vec<u128>,
     delta: u128,
     x0_keys: Vec<u128>,
     y0_keys: Vec<u128>,
+    z0_keys: Vec<u128>,
     r0_keys: Vec<u128>,
     type_data: PhantomData<FE>
 }
@@ -312,7 +421,7 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         let y1_pool = &uws[fraction..fraction * 2];
 
         // Pool of uws for r bit and mac generation
-        let r1_pool = &uws[fraction * 2.. fraction * 3];
+        let r1_pool = &uws[fraction * 2..fraction * 3];
 
         for (u, w) in x1_pool {
             x1_bits.push(*u.bit_decomposition().get(0).unwrap());
@@ -343,11 +452,13 @@ impl<FE: FiniteField> TripleReceiver<FE> {
             x1_macs,
             y1_bits,
             y1_macs,
+            z1_bits: vec![],
             r1_bits,
             r1_macs,
             delta,
             x0_keys,
             y0_keys,
+            z0_keys: vec![],
             r0_keys,
             type_data: PhantomData
         }
@@ -357,11 +468,11 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         let mut h: Vec<(bool, bool)> = Vec::new();
         let mut t0_bits: Vec<bool> = Vec::new();
 
-        for (i , x0_key) in self.x0_keys.iter().enumerate() {
+        for (i, x0_key) in self.x0_keys.iter().enumerate() {
             let t0: bool = rng.gen();
             t0_bits.push(t0);
-            let h0 = blake2(&x0_key.to_le_bytes()).lsb() ^ t0;
-            let h1 = blake2(&(x0_key ^ self.delta).to_le_bytes()).lsb() ^ t0 ^ self.y1_bits[i];
+            let h0 = blake2_128(&x0_key.to_le_bytes()).lsb() ^ t0;
+            let h1 = blake2_128(&(x0_key ^ self.delta).to_le_bytes()).lsb() ^ t0 ^ self.y1_bits[i];
             h.push((h0, h1));
         }
 
@@ -383,8 +494,8 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         let mut v1_bits: Vec<bool> = Vec::new();
         for (i, x1_mac) in self.x1_macs.iter().enumerate() {
             let x1: bool = self.x1_bits[i];
-            let h_x1: bool = if x1 { h_received[i].1} else { h_received[i].0};
-            let s1: bool = h_x1 ^ blake2(&x1_mac.to_le_bytes()).lsb();
+            let h_x1: bool = if x1 { h_received[i].1 } else { h_received[i].0 };
+            let s1: bool = h_x1 ^ blake2_128(&x1_mac.to_le_bytes()).lsb();
             let v1: bool = t0_bits[i] ^ s1;
             v1_bits.push(v1);
         }
@@ -421,25 +532,25 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         }
 
         let mut ts: Vec<u128> = Vec::new();
-        let mut us: Vec<u128>  = Vec::new();
+        let mut us: Vec<u128> = Vec::new();
         for i in 0..number_of_triples {
             if !self.x1_bits[i] {
-                let t0 = blake2(&[self.x0_keys[i].to_le_bytes(), (z0_keys[i] ^ (z1[i] as u128 * self.delta)).to_le_bytes()].concat());
+                let t0 = blake2_128(&[self.x0_keys[i].to_le_bytes(), (z0_keys[i] ^ (z1[i] as u128 * self.delta)).to_le_bytes()].concat());
                 ts.push(t0);
-                let u0 = t0 ^ blake2(&[(self.x0_keys[i] ^ self.delta).to_le_bytes(), (self.y0_keys[i] ^ z0_keys[i] ^ (self.y1_bits[i] ^ z1[i]) as u128 * self.delta).to_le_bytes()].concat());
+                let u0 = t0 ^ blake2_128(&[(self.x0_keys[i] ^ self.delta).to_le_bytes(), (self.y0_keys[i] ^ z0_keys[i] ^ (self.y1_bits[i] ^ z1[i]) as u128 * self.delta).to_le_bytes()].concat());
                 us.push(u0);
             } else {
-                let t1 = blake2(&[self.x0_keys[i].to_le_bytes(), (self.y0_keys[i] ^ z0_keys[i] ^ ((self.y1_bits[i] ^ z1[i]) as u128 * self.delta)).to_le_bytes()].concat());
+                let t1 = blake2_128(&[self.x0_keys[i].to_le_bytes(), (self.y0_keys[i] ^ z0_keys[i] ^ ((self.y1_bits[i] ^ z1[i]) as u128 * self.delta)).to_le_bytes()].concat());
                 ts.push(t1);
-                let u1 = t1 ^ blake2(&[(self.x0_keys[i] ^ self.delta).to_le_bytes(), (z0_keys[i] ^ (z1[i] as u128 * self.delta)).to_le_bytes()].concat());
+                let u1 = t1 ^ blake2_128(&[(self.x0_keys[i] ^ self.delta).to_le_bytes(), (z0_keys[i] ^ (z1[i] as u128 * self.delta)).to_le_bytes()].concat());
                 us.push(u1)
             }
         }
 
         // Sending U values on the channel
-         for &u in &us {
-             channel.write_u128(u).unwrap();
-         }
+        for &u in &us {
+            channel.write_u128(u).unwrap();
+        }
         channel.flush().unwrap();
 
         // let mut Ws: Vec<u128> = Vec::new();
@@ -447,7 +558,7 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         for i in 0..number_of_triples {
             let w0 = channel.read_u128().unwrap();
             let w1 = channel.read_u128().unwrap();
-            let mac_hash = blake2(&self.x1_macs[i].to_le_bytes());
+            let mac_hash = blake2_128(&self.x1_macs[i].to_le_bytes());
             if !self.x1_bits[i] {
                 r_primes.push(w0 ^ mac_hash ^ ts[i]);
             } else {
@@ -471,11 +582,11 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         for i in 0..number_of_triples {
             let r: u128 = rng.gen();
             rs.push(r);
-            let v0 = blake2(&[self.x1_macs[i].to_le_bytes(), self.r1_macs[i].to_le_bytes()].concat());
-            let v1 = blake2(&[self.x1_macs[i].to_le_bytes(), (self.r1_macs[i] ^ self.y1_macs[i]).to_le_bytes()].concat());
+            let v0 = blake2_128(&[self.x1_macs[i].to_le_bytes(), self.r1_macs[i].to_le_bytes()].concat());
+            let v1 = blake2_128(&[self.x1_macs[i].to_le_bytes(), (self.r1_macs[i] ^ self.y1_macs[i]).to_le_bytes()].concat());
 
-            let hash0 = blake2(&self.x0_keys[i].to_le_bytes());
-            let hash1 = blake2(&(self.x0_keys[i] ^ self.delta).to_le_bytes());
+            let hash0 = blake2_128(&self.x0_keys[i].to_le_bytes());
+            let hash1 = blake2_128(&(self.x0_keys[i] ^ self.delta).to_le_bytes());
             if !self.x1_bits[i] {
                 let w00 = hash0 ^ v0 ^ r;
                 let w01 = hash1 ^ v1 ^ r;
@@ -496,6 +607,9 @@ impl<FE: FiniteField> TripleReceiver<FE> {
 
         // EQ box
         assert!(self.eq(channel, &rs));
+
+        self.z1_bits = z1;
+        self.z0_keys = z0_keys;
     }
 
     // From NNOB/TinyOT
@@ -513,13 +627,91 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         for i in 0..ys.len() {
             let x = channel.read_u128().unwrap();
             let r = channel.read_u128().unwrap();
-            let c_prime = blake2(&[x.to_le_bytes(), r.to_le_bytes()].concat());
+            let c_prime = blake2_128(&[x.to_le_bytes(), r.to_le_bytes()].concat());
             if c_prime != cs[i] || x != ys[i] {
                 return false;
             }
         }
 
         return true;
+    }
+
+    fn a_and<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG, l: u128, b: usize) {
+        self.la_and(channel, rng);
+
+        let r_prime = channel.read_u128().unwrap();
+        let r = rng.gen();
+        channel.write_u128(r).unwrap();
+        channel.flush().unwrap();
+
+        let r_combined = blake2_256(&[r_prime.to_le_bytes(), r.to_le_bytes()].concat());
+        let mut cha_rng: ChaCha20Rng = ChaCha20Rng::from_seed(r_combined);
+
+        for i in (1..self.z1_bits.len()).rev() {
+            let j = cha_rng.gen_range(0..(i + 1));
+            self.z1_bits.swap(i, j);
+            self.z0_keys.swap(i, j);
+            self.r1_macs.swap(i, j);
+        }
+
+        let mut triples = Vec::new();
+        for i in (0..self.z1_bits.len()).step_by(b) {
+            let mut x_share = self.x1_bits[i];
+            let mut y_share = self.y1_bits[i];
+            let mut z_share = self.z1_bits[i];
+            let mut x_mac = self.x1_macs[i];
+            let mut y_mac = self.y1_macs[i];
+            let mut z_mac = self.r1_macs[i];
+            let mut x_key = self.x0_keys[i];
+            let mut y_key = self.y0_keys[i];
+            let mut z_key = self.r0_keys[i];
+            for j in 1..b {
+                let mut d = channel.read_bool().unwrap();
+                let mut d_mac = channel.read_u128().unwrap();
+                let d_key = y_key ^ self.y0_keys[j];
+
+                let d_delta = if d { self.delta } else { 0 };
+                if d_mac != d_key ^ d_delta {
+                    panic!("Wrong MAC");
+                }
+
+                let d_prime = y_share ^ self.y1_bits[j];
+                let d_prime_mac = y_mac ^ self.y1_macs[j];
+                channel.write_bool(d_prime).unwrap();
+                channel.write_u128(d_prime_mac).unwrap();
+                channel.flush().unwrap();
+
+                d = d ^ d_prime;
+
+                x_share = x_share ^ self.x1_bits[j];
+                x_mac = x_mac ^ self.x1_macs[j];
+                x_key = x_key ^ self.x0_keys[j];
+
+                if d {
+                    z_share = z_share ^ self.z1_bits[j] ^ self.x1_bits[j];
+                    z_mac = z_mac ^ self.r1_macs[j] ^ self.x1_macs[j];
+                    z_key = z_key ^ self.z0_keys[j] ^ self.x0_keys[j];
+                } else {
+                    z_share = z_share ^ self.z1_bits[j];
+                    z_mac = z_mac ^ self.r1_macs[j];
+                    z_key = z_key ^ self.z0_keys[j];
+                }
+            }
+            let triple = AuthTriple {
+                x_share,
+                y_share,
+                z_share,
+                x_mac,
+                y_mac,
+                z_mac,
+                x_key,
+                y_key,
+                z_key
+            };
+            triples.push(triple);
+        }
+        println!("Number of triples yes: {}", triples.len());
+        println!("Number of z's yes: {}", self.z1_bits.len());
     }
 }
 
@@ -554,7 +746,8 @@ mod tests {
             let mut channel = Channel::new(reader, writer);
             let mut triple_receiver: TripleReceiver<FE> = TripleReceiver::init(&mut channel, &mut rng);
             let v0 = triple_receiver.ha_and(&mut channel, &mut rng);
-            triple_receiver.la_and(&mut channel, &mut rng);
+            //triple_receiver.la_and(&mut channel, &mut rng);
+            triple_receiver.a_and(&mut channel, &mut rng, 1, 5);
             return (triple_receiver, v0);
         });
         let mut rng = AesRng::new();
@@ -564,7 +757,8 @@ mod tests {
 
         let mut triple_sender: TripleSender<FE> = TripleSender::init(&mut channel, &mut rng);
         let v1 = triple_sender.ha_and(&mut channel, &mut rng);
-        triple_sender.la_and(&mut channel, &mut rng);
+        //triple_sender.la_and(&mut channel, &mut rng);
+        triple_sender.a_and(&mut channel, &mut rng, 1, 5);
 
         let handle_return = handle.join().unwrap();
         let triple_receiver = handle_return.0;
@@ -583,10 +777,6 @@ mod tests {
         for i in 0..number_of_triples {
             let u_delta = u128::from(triple_receiver.y1_bits[i]) * triple_sender.delta;
             assert_eq!(triple_sender.y1_keys[i] ^ u_delta, triple_receiver.y1_macs[i]);
-        }
-        for i in 0..number_of_triples {
-            let u_delta = u128::from(triple_receiver.r1_bits[i]) * triple_sender.delta;
-            assert_eq!(triple_sender.r1_keys[i] ^ u_delta, triple_receiver.r1_macs[i]);
         }
         // v0 ^ v1 = x0y1 ^ x1y0
         for i in 0..number_of_triples {
