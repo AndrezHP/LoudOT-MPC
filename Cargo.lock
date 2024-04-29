@@ -1314,6 +1314,7 @@ dependencies = [
  "aes",
  "bincode",
  "blake2",
+ "criterion",
  "generic-array",
  "ocelot",
  "rand 0.8.5",
