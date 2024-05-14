@@ -1,12 +1,11 @@
 use ocelot::svole::{SVoleSender, SVoleReceiver, wykw};
 use rand::{CryptoRng, Rng, SeedableRng};
-use ocelot::svole::wykw::{LPN_EXTEND_EXTRASMALL, LPN_EXTEND_MEDIUM, LPN_EXTEND_SMALL, LPN_SETUP_EXTRASMALL, LPN_SETUP_MEDIUM, LPN_SETUP_SMALL};
+use ocelot::svole::wykw::{LPN_EXTEND_EXTRASMALL, LPN_EXTEND_MEDIUM, LPN_EXTEND_SMALL, LPN_SETUP_EXTRASMALL, LPN_SETUP_MEDIUM, LPN_SETUP_SMALL, LpnParams};
 use scuttlebutt::{field::{FiniteField}, AbstractChannel};
 use sha3::{digest::{Update}};
 use blake2::{Blake2b, Digest};
 use aes::cipher::consts::{U16, U32};
 use std::marker::PhantomData;
-use std::time::Instant;
 use rand_chacha::ChaCha20Rng;
 
 fn main() {
@@ -68,10 +67,10 @@ pub struct TripleSender<FE: FiniteField> {
 }
 
 impl<FE: FiniteField> TripleSender<FE> {
-    pub fn init<C: AbstractChannel, RNG: CryptoRng + Rng>(channel: &mut C, rng: &mut RNG) -> Self {
+    pub fn init<C: AbstractChannel, RNG: CryptoRng + Rng>(channel: &mut C, rng: &mut RNG, lpn_setup_params: LpnParams, lpn_extend_paramd: LpnParams) -> Self {
         // Get authenticated bit keys and delta
         let mut svole_receiver: wykw::Receiver<FE> =
-            wykw::Receiver::init(channel, rng, LPN_SETUP_EXTRASMALL, LPN_EXTEND_EXTRASMALL).unwrap();
+            wykw::Receiver::init(channel, rng, lpn_setup_params, lpn_extend_paramd).unwrap();
         let mut vs = Vec::new();
         svole_receiver.receive(channel, rng, &mut vs).unwrap();
         let delta = fe_to_u128(&svole_receiver.delta());
@@ -83,7 +82,7 @@ impl<FE: FiniteField> TripleSender<FE> {
 
         // Get authenticated bits and macs
         let mut svole_sender: wykw::Sender<FE> =
-            wykw::Sender::init(channel, rng, LPN_SETUP_EXTRASMALL, LPN_EXTEND_EXTRASMALL).unwrap();
+            wykw::Sender::init(channel, rng, lpn_setup_params, lpn_extend_paramd).unwrap();
         let mut uws = Vec::new();
         svole_sender.send(channel, rng, &mut uws).unwrap();
         let mut x0_bits = Vec::new();
@@ -168,9 +167,8 @@ impl<FE: FiniteField> TripleSender<FE> {
         }
         return v0_bits;
     }
-    pub fn la_and<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG) {
+    pub fn la_and<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG, v0: Vec<bool>) {
         let number_of_triples = self.x0_bits.len();
-        let v0: Vec<bool> = self.ha_and(channel, rng);
         let mut z0: Vec<bool> = Vec::new();
         for i in 0..number_of_triples {
             z0.push(v0[i] ^ (self.x0_bits[i] && self.y0_bits[i]));
@@ -302,27 +300,8 @@ impl<FE: FiniteField> TripleSender<FE> {
         return true;
     }
     pub fn wrk17_a_and<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG, b: usize) -> Vec<AuthTriple> {
-        self.la_and(channel, rng);
         self.permute(channel, rng);
-
-        let mut triples = Vec::new();
-        for i in 0..self.z0_bits.len() {
-            let triple = AuthTriple {
-                x_share: self.x0_bits[i],
-                y_share: self.y0_bits[i],
-                z_share: self.z0_bits[i],
-                x_mac: self.x0_macs[i],
-                y_mac: self.y0_macs[i],
-                z_mac: self.r0_macs[i],
-                x_key: self.x1_keys[i],
-                y_key: self.y1_keys[i],
-                z_key: self.z1_keys[i],
-            };
-            triples.push(triple);
-        }
-
-        return triples;
-        // return self.bucketing(channel, b);
+        return self.bucketing(channel, b);
     }
 
     fn bucketing<C: AbstractChannel>(&mut self, channel: &mut C, b: usize) -> Vec<AuthTriple> {
@@ -511,8 +490,26 @@ impl<FE: FiniteField> TripleSender<FE> {
 
         // Check correctness
         // Choose remaining triples, assign to buckets, do pairwise sacrifice
+        let mut verified_x0_bits = Vec::new();
+        let mut verified_x0_macs = Vec::new();
+        let mut verified_y0_bits = Vec::new();
+        let mut verified_y0_macs = Vec::new();
+        let mut verified_z0_bits = Vec::new();
+        let mut verified_r0_macs = Vec::new();
+        let mut verified_x1_keys = Vec::new();
+        let mut verified_y1_keys = Vec::new();
+        let mut verified_z1_keys = Vec::new();
         self.permute(channel, rng);
         for i in (0..self.z0_bits.len()).step_by(b) {
+            verified_x0_bits.push(self.x0_bits[i]);
+            verified_y0_bits.push(self.y0_bits[i]);
+            verified_z0_bits.push(self.z0_bits[i]);
+            verified_x0_macs.push(self.x0_macs[i]);
+            verified_y0_macs.push(self.y0_macs[i]);
+            verified_r0_macs.push(self.r0_macs[i]);
+            verified_x1_keys.push(self.x1_keys[i]);
+            verified_y1_keys.push(self.y1_keys[i]);
+            verified_z1_keys.push(self.z1_keys[i]);
             for j in i + 1..i + b + 1 {
                 if i + b + 1 >= self.z0_bits.len() {
                     break;
@@ -574,6 +571,16 @@ impl<FE: FiniteField> TripleSender<FE> {
             }
         }
 
+        self.x0_bits = verified_x0_bits;
+        self.y0_bits = verified_y0_bits;
+        self.z0_bits = verified_z0_bits;
+        self.x0_macs = verified_x0_macs;
+        self.y0_macs = verified_y0_macs;
+        self.r0_macs = verified_r0_macs;
+        self.x1_keys = verified_x1_keys;
+        self.y1_keys = verified_y1_keys;
+        self.z1_keys = verified_z1_keys;
+
         // Remove leakage -> similar to wrk17_a_and
         return self.bucketing(channel, b);
     }
@@ -596,10 +603,10 @@ pub struct TripleReceiver<FE: FiniteField> {
 }
 
 impl<FE: FiniteField> TripleReceiver<FE> {
-    pub fn init<C: AbstractChannel, RNG: CryptoRng + Rng>(channel: &mut C, rng: &mut RNG) -> Self {
+    pub fn init<C: AbstractChannel, RNG: CryptoRng + Rng>(channel: &mut C, rng: &mut RNG, lpn_setup_params: LpnParams, lpn_extend_params: LpnParams) -> Self {
         // Get authenticated bits and macs
         let mut svole_sender: wykw::Sender<FE> =
-            wykw::Sender::init(channel, rng, LPN_SETUP_EXTRASMALL, LPN_EXTEND_EXTRASMALL).unwrap();
+            wykw::Sender::init(channel, rng, lpn_setup_params, lpn_extend_params).unwrap();
         let mut uws = Vec::new();
         svole_sender.send(channel, rng, &mut uws).unwrap();
 
@@ -636,7 +643,7 @@ impl<FE: FiniteField> TripleReceiver<FE> {
 
         // Get authenticated bit keys and delta
         let mut svole_receiver: wykw::Receiver<FE> =
-            wykw::Receiver::init(channel, rng, LPN_SETUP_EXTRASMALL, LPN_EXTEND_EXTRASMALL).unwrap();
+            wykw::Receiver::init(channel, rng, lpn_setup_params, lpn_extend_params).unwrap();
         let mut vs = Vec::new();
         svole_receiver.receive(channel, rng, &mut vs).unwrap();
         let delta = fe_to_u128(&svole_receiver.delta());
@@ -701,9 +708,8 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         return v1_bits;
     }
 
-    fn la_and<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG) {
+    pub fn la_and<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG, v1: Vec<bool>) {
         let number_of_triples = self.x1_bits.len();
-        let v1: Vec<bool> = self.ha_and(channel, rng);
         let mut z1: Vec<bool> = Vec::new();
         for i in 0..number_of_triples {
             z1.push(v1[i] ^ (self.x1_bits[i] && self.y1_bits[i]));
@@ -835,26 +841,8 @@ impl<FE: FiniteField> TripleReceiver<FE> {
     }
 
     pub fn wrk17_a_and<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG, b: usize) -> Vec<AuthTriple> {
-        self.la_and(channel, rng);
         self.permute(channel, rng);
-        let mut triples = Vec::new();
-        for i in 0..self.z1_bits.len() {
-            let triple = AuthTriple {
-                x_share: self.x1_bits[i],
-                y_share: self.y1_bits[i],
-                z_share: self.z1_bits[i],
-                x_mac: self.x1_macs[i],
-                y_mac: self.y1_macs[i],
-                z_mac: self.r1_macs[i],
-                x_key: self.x0_keys[i],
-                y_key: self.y0_keys[i],
-                z_key: self.z0_keys[i],
-            };
-            triples.push(triple);
-        }
-
-        return triples;
-        // return self.bucketing(channel, b);
+        return self.bucketing(channel, b);
     }
 
     fn bucketing<C: AbstractChannel>(&mut self, channel: &mut C, b: usize) -> Vec<AuthTriple> {
@@ -868,7 +856,7 @@ impl<FE: FiniteField> TripleReceiver<FE> {
             let mut z_mac = self.r1_macs[i];
             let mut x_key = self.x0_keys[i];
             let mut y_key = self.y0_keys[i];
-            let mut z_key = self.r0_keys[i];
+            let mut z_key = self.z0_keys[i];
             for j in 1..b {
                 let mut d = channel.read_bool().unwrap();
                 let d_mac = channel.read_u128().unwrap();
@@ -1040,8 +1028,26 @@ impl<FE: FiniteField> TripleReceiver<FE> {
             // self.r0_keys.remove(i);
         }
 
+        let mut verified_x1_bits = Vec::new();
+        let mut verified_x1_macs = Vec::new();
+        let mut verified_y1_bits = Vec::new();
+        let mut verified_y1_macs = Vec::new();
+        let mut verified_z1_bits = Vec::new();
+        let mut verified_r1_macs = Vec::new();
+        let mut verified_x0_keys = Vec::new();
+        let mut verified_y0_keys = Vec::new();
+        let mut verified_z0_keys = Vec::new();
         self.permute(channel, rng);
         for i in (0..self.z1_bits.len()).step_by(b) {
+            verified_x1_bits.push(self.x1_bits[i]);
+            verified_y1_bits.push(self.y1_bits[i]);
+            verified_z1_bits.push(self.z1_bits[i]);
+            verified_x1_macs.push(self.x1_macs[i]);
+            verified_y1_macs.push(self.y1_macs[i]);
+            verified_r1_macs.push(self.r1_macs[i]);
+            verified_x0_keys.push(self.x0_keys[i]);
+            verified_y0_keys.push(self.y0_keys[i]);
+            verified_z0_keys.push(self.z0_keys[i]);
             for j in i + 1..i + b + 1 {
                 if i + b + 1 >= self.z1_bits.len() {
                     break;
@@ -1100,6 +1106,17 @@ impl<FE: FiniteField> TripleReceiver<FE> {
                 }
             }
         }
+
+        self.x1_bits = verified_x1_bits;
+        self.y1_bits = verified_y1_bits;
+        self.z1_bits = verified_z1_bits;
+        self.x1_macs = verified_x1_macs;
+        self.y1_macs = verified_y1_macs;
+        self.r1_macs = verified_r1_macs;
+        self.x0_keys = verified_x0_keys;
+        self.y0_keys = verified_y0_keys;
+        self.z0_keys = verified_z0_keys;
+
         return self.bucketing(channel, b);
     }
 }
@@ -1124,16 +1141,18 @@ mod tests {
         io::{BufReader, BufWriter},
         os::unix::net::UnixStream,
     };
-    use ocelot::svole::wykw::{Receiver, Sender};
+    use ocelot::svole::wykw::{LPN_EXTEND_LARGE, LPN_EXTEND_MEDIUM, LPN_EXTEND_SMALL, LPN_SETUP_LARGE, LPN_SETUP_MEDIUM, LPN_SETUP_SMALL, LpnParams, Receiver, Sender};
 
-    fn test_wrk17_a_and<FE: FF, Sender: SVoleSender<Msg = FE>, Receiver: SVoleReceiver<Msg = FE>>() {
+    fn test_wrk17_a_and<FE: FF, Sender: SVoleSender<Msg = FE>, Receiver: SVoleReceiver<Msg = FE>>(setup: LpnParams, extend: LpnParams) {
         let (sender, receiver) = UnixStream::pair().unwrap();
         let handle = std::thread::spawn(move || {
             let mut rng = AesRng::new();
             let reader = BufReader::new(sender.try_clone().unwrap());
             let writer = BufWriter::new(sender);
             let mut channel = Channel::new(reader, writer);
-            let mut triple_receiver: TripleReceiver<FE> = TripleReceiver::init(&mut channel, &mut rng);
+            let mut triple_receiver: TripleReceiver<FE> = TripleReceiver::init(&mut channel, &mut rng, setup, extend);
+            let v1: Vec<bool> = triple_receiver.ha_and(&mut channel, &mut rng);
+            triple_receiver.la_and(&mut channel, &mut rng, v1);
             let auth_triples_receiver = triple_receiver.wrk17_a_and(&mut channel, &mut rng, 3);
             return (triple_receiver, auth_triples_receiver);
         });
@@ -1142,14 +1161,16 @@ mod tests {
         let writer = BufWriter::new(receiver);
         let mut channel = Channel::new(reader, writer);
 
-        let mut triple_sender: TripleSender<FE> = TripleSender::init(&mut channel, &mut rng);
+        let mut triple_sender: TripleSender<FE> = TripleSender::init(&mut channel, &mut rng, setup, extend);
+        let number_of_triples = triple_sender.x0_bits.len();
+        let v0: Vec<bool> = triple_sender.ha_and(&mut channel, &mut rng);
+        triple_sender.la_and(&mut channel, &mut rng, v0);
         let auth_triples_sender = triple_sender.wrk17_a_and(&mut channel, &mut rng, 3);
 
         let handle_return = handle.join().unwrap();
         let triple_receiver = handle_return.0;
         let auth_triples_receiver = handle_return.1;
 
-        let number_of_triples = triple_sender.x0_bits.len();
         let number_of_auth_tiples = auth_triples_receiver.len();
 
         println!("# of triples: {}", number_of_triples);
@@ -1179,16 +1200,22 @@ mod tests {
             if !x {
                 println!("Wrong triple, {}", i);
             }
+            assert_eq!(t2.x_mac, t1.x_key ^ (t2.x_share as u128 * triple_sender.delta));
+            assert_eq!(t2.y_mac, t1.y_key ^ (t2.y_share as u128 * triple_sender.delta));
+            assert_eq!(t2.z_mac, t1.z_key ^ (t2.z_share as u128 * triple_sender.delta));
+            assert_eq!(t1.x_mac, t2.x_key ^ (t1.x_share as u128 * triple_receiver.delta));
+            assert_eq!(t1.y_mac, t2.y_key ^ (t1.y_share as u128 * triple_receiver.delta));
+            assert_eq!(t1.z_mac, t2.z_key ^ (t1.z_share as u128 * triple_receiver.delta));
         }
     }
-    fn test_ha_and<FE: FF, Sender: SVoleSender<Msg = FE>, Receiver: SVoleReceiver<Msg = FE>>() {
+    fn test_ha_and<FE: FF, Sender: SVoleSender<Msg = FE>, Receiver: SVoleReceiver<Msg = FE>>(setup: LpnParams, extend: LpnParams) {
         let (sender, receiver) = UnixStream::pair().unwrap();
         let handle = std::thread::spawn(move || {
             let mut rng = AesRng::new();
             let reader = BufReader::new(sender.try_clone().unwrap());
             let writer = BufWriter::new(sender);
             let mut channel = Channel::new(reader, writer);
-            let mut triple_receiver: TripleReceiver<FE> = TripleReceiver::init(&mut channel, &mut rng);
+            let mut triple_receiver: TripleReceiver<FE> = TripleReceiver::init(&mut channel, &mut rng, setup, extend);
             let v1 = triple_receiver.ha_and(&mut channel, &mut rng);
             return (triple_receiver, v1);
         });
@@ -1197,7 +1224,7 @@ mod tests {
         let writer = BufWriter::new(receiver);
         let mut channel = Channel::new(reader, writer);
 
-        let mut triple_sender: TripleSender<FE> = TripleSender::init(&mut channel, &mut rng);
+        let mut triple_sender: TripleSender<FE> = TripleSender::init(&mut channel, &mut rng, setup, extend);
         let v0 = triple_sender.ha_and(&mut channel, &mut rng);
 
         let handle_return = handle.join().unwrap();
@@ -1211,14 +1238,14 @@ mod tests {
     }
 
 
-        fn my_test_now<FE: FF, Sender: SVoleSender<Msg = FE>, Receiver: SVoleReceiver<Msg = FE>>() {
+    fn my_test_now<FE: FF, Sender: SVoleSender<Msg = FE>, Receiver: SVoleReceiver<Msg = FE>>(setup: LpnParams, extend: LpnParams) {
         let (sender, receiver) = UnixStream::pair().unwrap();
         let handle = std::thread::spawn(move || {
             let mut rng = AesRng::new();
             let reader = BufReader::new(sender.try_clone().unwrap());
             let writer = BufWriter::new(sender);
             let mut channel = Channel::new(reader, writer);
-            let mut triple_receiver: TripleReceiver<FE> = TripleReceiver::init(&mut channel, &mut rng);
+            let mut triple_receiver: TripleReceiver<FE> = TripleReceiver::init(&mut channel, &mut rng, setup, extend);
             let auth_triples = triple_receiver.hss17_a_and(&mut channel, &mut rng, 3);
             return (triple_receiver, auth_triples);
         });
@@ -1227,14 +1254,14 @@ mod tests {
         let writer = BufWriter::new(receiver);
         let mut channel = Channel::new(reader, writer);
 
-        let mut triple_sender: TripleSender<FE> = TripleSender::init(&mut channel, &mut rng);
+        let mut triple_sender: TripleSender<FE> = TripleSender::init(&mut channel, &mut rng, setup, extend);
+        let number_of_triples = triple_sender.x0_bits.len();
         let auth_triples_sender = triple_sender.hss17_a_and(&mut channel, &mut rng, 3);
 
         let handle_return = handle.join().unwrap();
         let triple_receiver = handle_return.0;
         let auth_triples_receiver = handle_return.1;
 
-        let number_of_triples = triple_sender.x0_bits.len();
         let number_of_auth_tiples = auth_triples_receiver.len();
 
         println!("# of triples: {}", number_of_triples);
@@ -1247,13 +1274,19 @@ mod tests {
             if !x {
                 panic!("Wrong triple, {}", i);
             }
+            assert_eq!(t2.x_mac, t1.x_key ^ (t2.x_share as u128 * triple_sender.delta));
+            assert_eq!(t2.y_mac, t1.y_key ^ (t2.y_share as u128 * triple_sender.delta));
+            assert_eq!(t2.z_mac, t1.z_key ^ (t2.z_share as u128 * triple_sender.delta));
+            assert_eq!(t1.x_mac, t2.x_key ^ (t1.x_share as u128 * triple_receiver.delta));
+            assert_eq!(t1.y_mac, t2.y_key ^ (t1.y_share as u128 * triple_receiver.delta));
+            assert_eq!(t1.z_mac, t2.z_key ^ (t1.z_share as u128 * triple_receiver.delta));
         }
     }
 
     #[test]
     fn test_lpn_svole_gf128() {
-        my_test_now::<F128b, Sender<F128b>, Receiver<F128b>>();
-        // test_wrk17_a_and::<F128b, Sender<F128b>, Receiver<F128b>>();
-        // test_ha_and::<F128b, Sender<F128b>, Receiver<F128b>>();
+        my_test_now::<F128b, Sender<F128b>, Receiver<F128b>>(LPN_SETUP_LARGE, LPN_EXTEND_LARGE);
+        // test_wrk17_a_and::<F128b, Sender<F128b>, Receiver<F128b>>(LPN_SETUP_MEDIUM, LPN_EXTEND_MEDIUM);
+        // test_ha_and::<F128b, Sender<F128b>, Receiver<F128b>>(LPN_SETUP_MEDIUM, LPN_EXTEND_MEDIUM);
     }
 }
