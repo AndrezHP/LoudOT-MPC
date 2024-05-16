@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use ocelot::svole::{SVoleSender, SVoleReceiver, wykw};
 use rand::{CryptoRng, Rng, SeedableRng};
 use ocelot::svole::wykw::{LPN_EXTEND_EXTRASMALL, LPN_EXTEND_MEDIUM, LPN_EXTEND_SMALL, LPN_SETUP_EXTRASMALL, LPN_SETUP_MEDIUM, LPN_SETUP_SMALL, LpnParams};
@@ -6,6 +7,7 @@ use sha3::{digest::{Update}};
 use blake2::{Blake2b, Digest};
 use aes::cipher::consts::{U16, U32};
 use std::marker::PhantomData;
+use std::time::Instant;
 use rand_chacha::ChaCha20Rng;
 
 fn main() {
@@ -316,30 +318,43 @@ impl<FE: FiniteField> TripleSender<FE> {
             let mut x_key = self.x1_keys[i];
             let mut y_key = self.y1_keys[i];
             let mut z_key = self.z1_keys[i];
+
+            let mut ds = Vec::new();
+            let mut d_macs = Vec::new();
             for j in 1..b {
-                let mut d = y_share ^ self.y0_bits[j];
+                let d = y_share ^ self.y0_bits[j];
                 let d_mac = y_mac ^ self.y0_macs[j];
-                channel.write_bool(d).unwrap();
-                channel.write_u128(d_mac).unwrap();
-                channel.flush().unwrap();
+                ds.push(d);
+                d_macs.push(d_mac);
+            }
+            for j in 0..ds.len() {
+                channel.write_bool(ds[j]).unwrap();
+                channel.write_u128(d_macs[j]).unwrap();
+            }
+            channel.flush().unwrap();
 
-                let d_prime = channel.read_bool().unwrap();
-                let d_prime_mac = channel.read_u128().unwrap();
+            let mut ds_prime = Vec::new();
+            let mut d_prime_macs = Vec::new();
+            for _ in 1..b {
+                ds_prime.push(channel.read_bool().unwrap());
+                d_prime_macs.push(channel.read_u128().unwrap());
+            }
 
+            for j in 1..b {
                 let d_prime_key = y_key ^ self.y1_keys[j];
 
-                let d_delta = if d_prime { self.delta } else { 0 };
-                if d_prime_mac != d_prime_key ^ d_delta {
+                let d_delta = if ds_prime[j - 1] { self.delta } else { 0 };
+                if d_prime_macs[j - 1] != d_prime_key ^ d_delta {
                     panic!("Wrong MAC");
                 }
 
-                d = d ^ d_prime;
+                ds[j - 1] = ds[j - 1] ^ ds_prime[j - 1];
 
                 x_share = x_share ^ self.x0_bits[j];
                 x_mac = x_mac ^ self.x0_macs[j];
                 x_key = x_key ^ self.x1_keys[j];
 
-                if d {
+                if ds[j - 1] {
                     z_share = z_share ^ self.z0_bits[j] ^ self.x0_bits[j];
                     z_mac = z_mac ^ self.r0_macs[j] ^ self.x0_macs[j];
                     z_key = z_key ^ self.z1_keys[j] ^ self.x1_keys[j];
@@ -500,6 +515,12 @@ impl<FE: FiniteField> TripleSender<FE> {
         let mut verified_y1_keys = Vec::new();
         let mut verified_z1_keys = Vec::new();
         self.permute(channel, rng);
+
+        let mut d1s = Vec::new();
+        let mut e1s = Vec::new();
+        let mut d1_macs = Vec::new();
+        let mut e1_macs = Vec::new();
+
         for i in (0..self.z0_bits.len()).step_by(b) {
             verified_x0_bits.push(self.x0_bits[i]);
             verified_y0_bits.push(self.y0_bits[i]);
@@ -514,59 +535,124 @@ impl<FE: FiniteField> TripleSender<FE> {
                 if i + b + 1 >= self.z0_bits.len() {
                     break;
                 }
-                let d1 = self.x0_bits[i] ^ self.x0_bits[j];
-                let e1 = self.y0_bits[i] ^ self.y0_bits[j];
-                let d1_mac = self.x0_macs[i] ^ self.x0_macs[j];
-                let e1_mac = self.y0_macs[i] ^ self.y0_macs[j];
+                let d2 = self.x0_bits[i] ^ self.x0_bits[j];
+                let e2 = self.y0_bits[i] ^ self.y0_bits[j];
+                let d2_mac = self.x0_macs[i] ^ self.x0_macs[j];
+                let e2_mac = self.y0_macs[i] ^ self.y0_macs[j];
 
-                channel.write_bool(d1).unwrap();
-                channel.write_bool(e1).unwrap();
-                channel.write_u128(d1_mac).unwrap();
-                channel.write_u128(e1_mac).unwrap();
-                channel.flush().unwrap();
+                d1s.push(d2);
+                d1_macs.push(d2_mac);
+                e1s.push(e2);
+                e1_macs.push(e2_mac);
+            }
+        }
+
+        let mut d2s_received = VecDeque::new();
+        let mut e2s_received = VecDeque::new();
+        let mut d2_macs_received = VecDeque::new();
+        let mut e2_macs_received = VecDeque::new();
+
+        for i in 0..d1s.len(){
+            channel.write_bool(d1s[i]).unwrap();
+            channel.write_bool(e1s[i]).unwrap();
+            channel.write_u128(d1_macs[i]).unwrap();
+            channel.write_u128(e1_macs[i]).unwrap();
+        }
+        channel.flush().unwrap();
+        for _ in 0..d1s.len() {
+            d2s_received.push_back(channel.read_bool().unwrap());
+            e2s_received.push_back(channel.read_bool().unwrap());
+            d2_macs_received.push_back(channel.read_u128().unwrap());
+            e2_macs_received.push_back(channel.read_u128().unwrap());
+        }
+
+        let mut ds = VecDeque::new();
+        let mut es = VecDeque::new();
+        for i in (0..self.z0_bits.len()).step_by(b) {
+            for j in i + 1..i + b + 1 {
+                if i + b + 1 >= self.z0_bits.len() {
+                    break;
+                }
+                let d2_received = d2s_received.pop_front().unwrap();
+                let e2_received = e2s_received.pop_front().unwrap();
+                let d2_mac_received = d2_macs_received.pop_front().unwrap();
+                let e2_mac_received = e2_macs_received.pop_front().unwrap();
 
                 let d2_key = self.x1_keys[i] ^ self.x1_keys[j];
                 let e2_key = self.y1_keys[i] ^ self.y1_keys[j];
 
-                let d2_received = channel.read_bool().unwrap();
-                let e2_received = channel.read_bool().unwrap();
-                let d2_mac_received = channel.read_u128().unwrap();
-                let e2_mac_received = channel.read_u128().unwrap();
-
                 if d2_mac_received != d2_key ^ (d2_received as u128 * self.delta) {
-                    panic!("MAC check failed");
+                    panic!("MAC check failed for i = {} and j = {}", i, j);
                 }
 
                 if e2_mac_received != e2_key ^ (e2_received as u128 * self.delta) {
                     panic!("MAC check failed");
                 }
 
-                let d = d1 ^ d2_received;
-                let e = e1 ^ e2_received;
+                let d1 = self.x0_bits[i] ^ self.x0_bits[j];
+                let e1 = self.y0_bits[i] ^ self.y0_bits[j];
 
+                let d = d2_received ^ d1;
+                let e = e2_received ^ e1;
+
+                ds.push_back(d);
+                es.push_back(e);
+            }
+        }
+
+        let mut f1s = VecDeque::new();
+        let mut f1_macs = VecDeque::new();
+        let mut f2_keys = VecDeque::new();
+
+        for i in (0..self.z0_bits.len()).step_by(b) {
+            for j in i + 1..i + b + 1 {
+                if i + b + 1 >= self.z0_bits.len() {
+                    break;
+                }
+                let d = ds.pop_front().unwrap();
+                let e = es.pop_front().unwrap();
                 let f1 = self.z0_bits[i] ^ self.z0_bits[j] ^ (d && self.y0_bits[i]) ^ (e && self.x0_bits[i]) ^ (d && e);
-
                 let f1_mac = self.r0_macs[i] ^ self.r0_macs[j] ^ (d as u128 * self.y0_macs[i]) ^ (e as u128 * self.x0_macs[i]);
-
-                // Send f and f_mac to the other party
-                channel.write_bool(f1).unwrap();
-                channel.write_u128(f1_mac).unwrap();
-                channel.flush().unwrap();
-
-                // Receive f and f_mac from the other party and check
-                let f2_received = channel.read_bool().unwrap();
-                let f2_mac_received = channel.read_u128().unwrap();
                 let f2_key = self.z1_keys[i] ^ self.z1_keys[j] ^
                     (d as u128 * self.y1_keys[i]) ^
                     (e as u128 * self.x1_keys[i]);
+                f1s.push_back(f1);
+                f1_macs.push_back(f1_mac);
+                f2_keys.push_back(f2_key);
+            }
+        }
+
+        for i in 0..f1s.len() {
+            channel.write_bool(f1s[i]).unwrap();
+            channel.write_u128(f1_macs[i]).unwrap();
+        }
+        channel.flush().unwrap();
+
+        let mut f2s_received = VecDeque::new();
+        let mut f2_macs_received = VecDeque::new();
+        for _ in 0..f1s.len() {
+            f2s_received.push_back(channel.read_bool().unwrap());
+            f2_macs_received.push_back(channel.read_u128().unwrap());
+        }
+
+        for i in (0..self.z0_bits.len()).step_by(b) {
+            for j in i + 1..i + b + 1 {
+                if i + b + 1 >= self.z0_bits.len() {
+                    break;
+                }
+
+                let f2_received = f2s_received.pop_front().unwrap();
+                let f2_mac_received = f2_macs_received.pop_front().unwrap();
+                let f2_key = f2_keys.pop_front().unwrap();
+                let f1 = f1s.pop_front().unwrap();
 
                 if f2_mac_received != f2_key ^ (f2_received as u128 * self.delta) {
                     panic!("MAC check failed");
                 }
 
-                let f = f1 ^ f2_received;
+                let f = f2_received ^ f1;
                 if f {
-                    panic!("f is not ZERO! It was: {}, i = {}", f, i);
+                    panic!("f is not ZERO! It was: {}, i = {}, j = {}", f, i, j);
                 }
             }
         }
@@ -846,6 +932,7 @@ impl<FE: FiniteField> TripleReceiver<FE> {
     }
 
     fn bucketing<C: AbstractChannel>(&mut self, channel: &mut C, b: usize) -> Vec<AuthTriple> {
+        let bucketing_start = Instant::now();
         let mut triples = Vec::new();
         for i in (0..self.z1_bits.len()).step_by(b) {
             let mut x_share = self.x1_bits[i];
@@ -857,29 +944,43 @@ impl<FE: FiniteField> TripleReceiver<FE> {
             let mut x_key = self.x0_keys[i];
             let mut y_key = self.y0_keys[i];
             let mut z_key = self.z0_keys[i];
+
+            let mut ds = Vec::new();
+            let mut d_macs = Vec::new();
+            for _ in 1..b {
+                ds.push(channel.read_bool().unwrap());
+                d_macs.push(channel.read_u128().unwrap());
+            }
+
+            let mut ds_prime = Vec::new();
+            let mut d_prime_macs = Vec::new();
             for j in 1..b {
-                let mut d = channel.read_bool().unwrap();
-                let d_mac = channel.read_u128().unwrap();
+                let d_prime = y_share ^ self.y1_bits[j];
+                let d_prime_mac = y_mac ^ self.y1_macs[j];
+                ds_prime.push(d_prime);
+                d_prime_macs.push(d_prime_mac);
+            }
+            for j in 0..ds_prime.len() {
+                channel.write_bool(ds_prime[j]).unwrap();
+                channel.write_u128(d_prime_macs[j]).unwrap();
+            }
+            channel.flush().unwrap();
+
+            for j in 1..b {
                 let d_key = y_key ^ self.y0_keys[j];
 
-                let d_delta = if d { self.delta } else { 0 };
-                if d_mac != d_key ^ d_delta {
+                let d_delta = if ds[j - 1] { self.delta } else { 0 };
+                if d_macs[j - 1] != d_key ^ d_delta {
                     panic!("Wrong MAC");
                 }
 
-                let d_prime = y_share ^ self.y1_bits[j];
-                let d_prime_mac = y_mac ^ self.y1_macs[j];
-                channel.write_bool(d_prime).unwrap();
-                channel.write_u128(d_prime_mac).unwrap();
-                channel.flush().unwrap();
-
-                d = d ^ d_prime;
+                ds[j - 1] = ds[j - 1] ^ ds_prime[j - 1];
 
                 x_share = x_share ^ self.x1_bits[j];
                 x_mac = x_mac ^ self.x1_macs[j];
                 x_key = x_key ^ self.x0_keys[j];
 
-                if d {
+                if ds[j - 1] {
                     z_share = z_share ^ self.z1_bits[j] ^ self.x1_bits[j];
                     z_mac = z_mac ^ self.r1_macs[j] ^ self.x1_macs[j];
                     z_key = z_key ^ self.z0_keys[j] ^ self.x0_keys[j];
@@ -902,6 +1003,7 @@ impl<FE: FiniteField> TripleReceiver<FE> {
             };
             triples.push(triple);
         }
+        println!("Bucketing: {:?}", bucketing_start.elapsed());
         return triples;
     }
 
@@ -987,8 +1089,10 @@ impl<FE: FiniteField> TripleReceiver<FE> {
     }
 
     pub fn hss17_a_and<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, channel: &mut C, rng: &mut RNG, b: usize) -> Vec<AuthTriple> {
+        let ha_and_start = Instant::now();
         self.hss17_ha_and(channel, rng, b);
-
+        println!("HA_AND: {:?}", ha_and_start.elapsed());
+        let a_and_start = Instant::now();
         let hash_s = channel.read_u128().unwrap();
         let t: u128 = rng.gen();
         channel.write_u128(t).unwrap();
@@ -1037,7 +1141,15 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         let mut verified_x0_keys = Vec::new();
         let mut verified_y0_keys = Vec::new();
         let mut verified_z0_keys = Vec::new();
+        let permute_start = Instant::now();
         self.permute(channel, rng);
+        println!("PERMUTE: {:?}", permute_start.elapsed());
+
+        let mut d2s = Vec::new();
+        let mut d2_macs = Vec::new();
+        let mut e2s = Vec::new();
+        let mut e2_macs = Vec::new();
+
         for i in (0..self.z1_bits.len()).step_by(b) {
             verified_x1_bits.push(self.x1_bits[i]);
             verified_y1_bits.push(self.y1_bits[i]);
@@ -1052,10 +1164,48 @@ impl<FE: FiniteField> TripleReceiver<FE> {
                 if i + b + 1 >= self.z1_bits.len() {
                     break;
                 }
-                let d1_received = channel.read_bool().unwrap();
-                let e1_received = channel.read_bool().unwrap();
-                let d1_mac_received = channel.read_u128().unwrap();
-                let e1_mac_received = channel.read_u128().unwrap();
+                let d2 = self.x1_bits[i] ^ self.x1_bits[j];
+                let e2 = self.y1_bits[i] ^ self.y1_bits[j];
+                let d2_mac = self.x1_macs[i] ^ self.x1_macs[j];
+                let e2_mac = self.y1_macs[i] ^ self.y1_macs[j];
+
+                d2s.push(d2);
+                d2_macs.push(d2_mac);
+                e2s.push(e2);
+                e2_macs.push(e2_mac);
+            }
+        }
+
+        let mut d1s_received = VecDeque::new();
+        let mut e1s_received = VecDeque::new();
+        let mut d1_macs_received = VecDeque::new();
+        let mut e1_macs_received = VecDeque::new();
+
+        for _ in 0..d2s.len() {
+            d1s_received.push_back(channel.read_bool().unwrap());
+            e1s_received.push_back(channel.read_bool().unwrap());
+            d1_macs_received.push_back(channel.read_u128().unwrap());
+            e1_macs_received.push_back(channel.read_u128().unwrap());
+        }
+        for i in 0..d2s.len(){
+            channel.write_bool(d2s[i]).unwrap();
+            channel.write_bool(e2s[i]).unwrap();
+            channel.write_u128(d2_macs[i]).unwrap();
+            channel.write_u128(e2_macs[i]).unwrap();
+        }
+        channel.flush().unwrap();
+
+        let mut ds = VecDeque::new();
+        let mut es = VecDeque::new();
+        for i in (0..self.z1_bits.len()).step_by(b) {
+            for j in i + 1..i + b + 1 {
+                if i + b + 1 >= self.z1_bits.len() {
+                    break;
+                }
+                let d1_received = d1s_received.pop_front().unwrap();
+                let e1_received = e1s_received.pop_front().unwrap();
+                let d1_mac_received = d1_macs_received.pop_front().unwrap();
+                let e1_mac_received = e1_macs_received.pop_front().unwrap();
 
                 let d1_key = self.x0_keys[i] ^ self.x0_keys[j];
                 let e1_key = self.y0_keys[i] ^ self.y0_keys[j];
@@ -1071,34 +1221,64 @@ impl<FE: FiniteField> TripleReceiver<FE> {
                 let d2 = self.x1_bits[i] ^ self.x1_bits[j];
                 let e2 = self.y1_bits[i] ^ self.y1_bits[j];
 
-                let d2_mac = self.x1_macs[i] ^ self.x1_macs[j];
-                let e2_mac = self.y1_macs[i] ^ self.y1_macs[j];
-                channel.write_bool(d2).unwrap();
-                channel.write_bool(e2).unwrap();
-                channel.write_u128(d2_mac).unwrap();
-                channel.write_u128(e2_mac).unwrap();
-                channel.flush().unwrap();
-
                 let d = d1_received ^ d2;
                 let e = e1_received ^ e2;
 
-                let f1_received = channel.read_bool().unwrap();
-                let f1_mac_received = channel.read_u128().unwrap();
+                ds.push_back(d);
+                es.push_back(e);
+            }
+        }
+
+        let mut f2s = VecDeque::new();
+        let mut f2_macs = VecDeque::new();
+        let mut f1_keys = VecDeque::new();
+
+        for i in (0..self.z1_bits.len()).step_by(b) {
+            for j in i + 1..i + b + 1 {
+                if i + b + 1 >= self.z1_bits.len() {
+                    break;
+                }
+                let d = ds.pop_front().unwrap();
+                let e = es.pop_front().unwrap();
+                let f2 = self.z1_bits[i] ^ self.z1_bits[j] ^ (d && self.y1_bits[i]) ^ (e && self.x1_bits[i]);
+                let f2_mac = self.r1_macs[i] ^ self.r1_macs[j] ^ (d as u128 * self.y1_macs[i]) ^ (e as u128 * self.x1_macs[i]);
                 let f1_key = self.z0_keys[i] ^ self.z0_keys[j] ^
                     (d as u128 * self.y0_keys[i]) ^
                     (e as u128 * self.x0_keys[i]) ^
                     ((d && e) as u128) * self.delta;
+                f2s.push_back(f2);
+                f2_macs.push_back(f2_mac);
+                f1_keys.push_back(f1_key);
+            }
+        }
+
+        let mut f1s_received = VecDeque::new();
+        let mut f1_macs_received = VecDeque::new();
+        for _ in 0..f2s.len() {
+            f1s_received.push_back(channel.read_bool().unwrap());
+            f1_macs_received.push_back(channel.read_u128().unwrap());
+        }
+
+        for i in 0..f2s.len() {
+            channel.write_bool(f2s[i]).unwrap();
+            channel.write_u128(f2_macs[i]).unwrap();
+        }
+        channel.flush().unwrap();
+
+        for i in (0..self.z1_bits.len()).step_by(b) {
+            for j in i + 1..i + b + 1 {
+                if i + b + 1 >= self.z1_bits.len() {
+                    break;
+                }
+
+                let f1_received = f1s_received.pop_front().unwrap();
+                let f1_mac_received = f1_macs_received.pop_front().unwrap();
+                let f1_key = f1_keys.pop_front().unwrap();
+                let f2 = f2s.pop_front().unwrap();
 
                 if f1_mac_received != f1_key ^ (f1_received as u128 * self.delta) {
                     panic!("MAC check failed");
                 }
-
-                let f2 = self.z1_bits[i] ^ self.z1_bits[j] ^ (d && self.y1_bits[i]) ^ (e && self.x1_bits[i]);
-                let f2_mac = self.r1_macs[i] ^ self.r1_macs[j] ^ (d as u128 * self.y1_macs[i]) ^ (e as u128 * self.x1_macs[i]);
-
-                channel.write_bool(f2).unwrap();
-                channel.write_u128(f2_mac).unwrap();
-                channel.flush().unwrap();
 
                 let f = f1_received ^ f2;
                 if f {
@@ -1116,6 +1296,8 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         self.x0_keys = verified_x0_keys;
         self.y0_keys = verified_y0_keys;
         self.z0_keys = verified_z0_keys;
+
+        println!("A_AND: {:?}", a_and_start.elapsed());
 
         return self.bucketing(channel, b);
     }
@@ -1141,6 +1323,7 @@ mod tests {
         io::{BufReader, BufWriter},
         os::unix::net::UnixStream,
     };
+    use std::time::Instant;
     use ocelot::svole::wykw::{LPN_EXTEND_LARGE, LPN_EXTEND_MEDIUM, LPN_EXTEND_SMALL, LPN_SETUP_LARGE, LPN_SETUP_MEDIUM, LPN_SETUP_SMALL, LpnParams, Receiver, Sender};
 
     fn test_wrk17_a_and<FE: FF, Sender: SVoleSender<Msg = FE>, Receiver: SVoleReceiver<Msg = FE>>(setup: LpnParams, extend: LpnParams) {
@@ -1245,7 +1428,9 @@ mod tests {
             let reader = BufReader::new(sender.try_clone().unwrap());
             let writer = BufWriter::new(sender);
             let mut channel = Channel::new(reader, writer);
+            let init_start = Instant::now();
             let mut triple_receiver: TripleReceiver<FE> = TripleReceiver::init(&mut channel, &mut rng, setup, extend);
+            println!("INIT: {:?}", init_start.elapsed());
             let auth_triples = triple_receiver.hss17_a_and(&mut channel, &mut rng, 3);
             return (triple_receiver, auth_triples);
         });

@@ -1,5 +1,6 @@
 use std::io::{BufReader, BufWriter};
 use std::os::unix::net::UnixStream;
+use std::time::Instant;
 use criterion::{criterion_group, criterion_main, Criterion};
 use scuttlebutt::{AesRng, Channel, field::{FiniteField as FF}};
 use loud_ot_mpc::main::{TripleReceiver, TripleSender};
@@ -14,10 +15,18 @@ fn wrk17_protocol<FE: FF, Sender: SVoleSender<Msg = FE>, Receiver: SVoleReceiver
         let reader = BufReader::new(sender.try_clone().unwrap());
         let writer = BufWriter::new(sender);
         let mut channel = Channel::new(reader, writer);
+        let init_start = Instant::now();
         let mut triple_receiver: TripleReceiver<FE> = TripleReceiver::init(&mut channel, &mut rng, setup, extend);
+        println!("init {:?}", init_start.elapsed());
+        let ha_and_start = Instant::now();
         let v1: Vec<bool> = triple_receiver.ha_and(&mut channel, &mut rng);
+        println!("ha_and: {:?}", ha_and_start.elapsed());
+        let la_and_start = Instant::now();
         triple_receiver.la_and(&mut channel, &mut rng, v1);
+        println!("la_and: {:?}", la_and_start.elapsed());
+        let a_and_start = Instant::now();
         let auth_triples_receiver = triple_receiver.wrk17_a_and(&mut channel, &mut rng, 3);
+        println!("a_and: {:?}", a_and_start.elapsed());
         return (triple_receiver, auth_triples_receiver);
     });
     let mut rng = AesRng::new();
@@ -101,6 +110,12 @@ fn criterion_benchmark_large(c: &mut Criterion) {
     group.finish();
 }
 
+fn criterion_benchmark_hss17_large(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large");
+    group.bench_function("hss17 whole protocol", |b| b.iter(|| hss17_protocol::<F128b, Sender<F128b>, Receiver<F128b>>(LPN_SETUP_LARGE, LPN_EXTEND_LARGE)));
+    group.finish();
+}
+
 fn criterion_benchmark_wrk17(c: &mut Criterion) {
     let mut group = c.benchmark_group("wrk17");
     for params in [(LPN_SETUP_EXTRASMALL, LPN_EXTEND_EXTRASMALL), (LPN_SETUP_SMALL, LPN_EXTEND_SMALL)].iter() {
@@ -130,6 +145,6 @@ fn criterion_benchmark_init_large(c: &mut Criterion) {
 criterion_group!{
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = criterion_benchmark_init_large
+    targets = criterion_benchmark_large
 }
 criterion_main!(benches);
