@@ -857,7 +857,9 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         }
 
         // EQ box
+        let eq_start = Instant::now();
         assert!(self.eq(channel, &r_primes));
+        println!("EQ box: {:?}", eq_start.elapsed());
 
         // Do it all again but reverse roles
         // Get U from B
