@@ -122,6 +122,14 @@ where
         deltas: &[Self::Msg],
         rng: &mut RNG,
     ) -> Result<Vec<(Self::Msg, Self::Msg)>, Error>;
+    /// Implements the aBit functionality used in TinyOT triple generation.
+    fn send_auth_bit<C: AbstractChannel, RNG: CryptoRng + Rng>(
+        &mut self,
+        channel: &mut C,
+        delta: Self::Msg,
+        m: usize,
+        rng: &mut RNG,
+    ) -> Result<Vec<Self::Msg>, Error>;
 }
 
 /// Trait for one-out-of-two _correlated_ oblivious transfer from the receiver's

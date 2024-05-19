@@ -73,6 +73,15 @@ impl<OT: OtReceiver<Msg = Block> + Malicious> CorrelatedSender for Sender<OT> {
     ) -> Result<Vec<(Self::Msg, Self::Msg)>, Error> {
         self.ot.send_correlated(channel, deltas, rng)
     }
+    fn send_auth_bit<C: AbstractChannel, RNG: CryptoRng + Rng>(
+        &mut self,
+        channel: &mut C,
+        delta: Self::Msg,
+        m: usize,
+        rng: &mut RNG,
+    ) -> Result<Vec<Self::Msg>, Error> {
+        self.ot.send_auth_bit(channel, delta, m, rng)
+    }
 }
 
 impl<OT: OtReceiver<Msg = Block> + Malicious> RandomSender for Sender<OT> {

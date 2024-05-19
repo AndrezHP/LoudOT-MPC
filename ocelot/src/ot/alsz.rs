@@ -143,6 +143,17 @@ impl<OT: OtReceiver<Msg = Block> + SemiHonest> CorrelatedSender for Sender<OT> {
         channel.flush()?;
         Ok(out)
     }
+    // This is not used
+    fn send_auth_bit<C: AbstractChannel, RNG: CryptoRng + Rng>(
+        &mut self,
+        channel: &mut C,
+        delta: Self::Msg,
+        m: usize,
+        rng: &mut RNG,
+    ) -> Result<Vec<Self::Msg>, Error> {
+        let out = Vec::new();
+        Ok(out)
+    }
 }
 
 impl<OT: OtReceiver<Msg = Block> + SemiHonest> RandomSender for Sender<OT> {
