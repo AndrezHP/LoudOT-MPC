@@ -86,7 +86,7 @@ impl<FE: FiniteField> TripleSender<FE> {
         lpn_extend_paramd: LpnParams,
     ) -> Self {
         return Self::iknp_auth_bit::<C, RNG, ot::KosDeltaSender, ot::KosDeltaReceiver>(
-            channel, rng, 10000000,
+            channel, rng, 10805248,
         );
         // Get authenticated bit keys and delta
         let mut svole_receiver: wykw::Receiver<FE> =
@@ -866,7 +866,7 @@ impl<FE: FiniteField> TripleReceiver<FE> {
         lpn_extend_params: LpnParams,
     ) -> Self {
         return Self::iknp_auth_bit::<C, RNG, ot::KosDeltaSender, ot::KosDeltaReceiver>(
-            channel, rng, 10000000,
+            channel, rng, 10805248,
         );
         // Get authenticated bits and macs
         let mut svole_sender: wykw::Sender<FE> =
